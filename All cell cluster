@@ -1,0 +1,692 @@
+
+library(Seurat)
+library(harmony)
+
+##  read file ##
+setwd("D:/work/reference/GSE245552_RAW")
+samples = list.files("./")
+sceList = lapply(samples,function(pro){
+  folder=file.path("./",pro)
+  CreateSeuratObject(counts = Read10X(folder),
+                     project = pro,
+                     min.cells = 3, min.features = 200)
+})
+
+library(DoubletFinder)
+
+for (i in 2:39) {
+  sceList[[i]][["percent.mt"]] <- PercentageFeatureSet(sceList[[i]], pattern = "^MT-")
+  #sceList[[i]][["percent.rb"]] <- PercentageFeatureSet(sceList[[i]], pattern = "^RP[SL]")
+  sceList[[i]] <- subset(sceList[[i]], subset =  nFeature_RNA > 200 & nFeature_RNA < 7500 & percent.mt < 10 & nCount_RNA < 100000 )
+  sceList[[i]] <- NormalizeData(sceList[[i]], normalization.method = "LogNormalize", scale.factor = 10000)
+  sceList[[i]] <- FindVariableFeatures(sceList[[i]], selection.method = "vst", nfeatures = 2000)
+  sceList[[i]] <- ScaleData(sceList[[i]])
+  sceList[[i]] <- RunPCA(sceList[[i]])
+  sceList[[i]] <- FindNeighbors(sceList[[i]], dims = 1:20)
+  sceList[[i]] <- FindClusters(sceList[[i]], resolution = 0.5)
+  sceList[[i]] <- RunUMAP(sceList[[i]],dims = 1:20)
+  
+  sweep.res.list <- paramSweep(sceList[[i]], PCs = 1:10, sct = FALSE)
+  #使用log标准化，sct参数设置为 sct = F（默认 ）,如使用SCT标准化方法，设置为T
+  for(j in 1:length(sweep.res.list)){
+    if(length(sweep.res.list[[j]]$pANN[is.nan(sweep.res.list[[j]]$pANN)]) != 0){
+      if(j != 1){
+        sweep.res.list[[j]] <- sweep.res.list[[j - 1]]
+      }else{
+        sweep.res.list[[j]] <- sweep.res.list[[j + 1]]
+      }
+    }
+  }
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  #可以看到最佳参数的点
+  pk_v <- as.numeric(as.character(bcmvn$pK))
+  pk_good <- pk_v[bcmvn$BCmetric==max(bcmvn$BCmetric)]
+  DoubletRate = 0.075
+  #10000细胞对应的doublets rate是～7.6%
+  homotypic.prop <- modelHomotypic(sceList[[i]]$seurat_clusters) #最好提供celltype，而不是seurat_clusters。
+  nExp_poi <- round(DoubletRate*ncol(sceList[[i]]))
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  #nExp_poi <- round(length(colnames(sceList[[i]]))*8*1e-6*length(colnames(sceList[[i]])))
+  sceList[[i]] <- doubletFinder(sceList[[i]], PCs = 1:10, pN = 0.25, pK = pk_good, nExp = nExp_poi.adj, reuse.pANN = FALSE, sct = FALSE)
+  
+}
+
+
+
+
+sce.big <- merge(sceList[[1]],
+                 y = c(sceList[[2]],
+                       sceList[[3]],
+                       sceList[[4]],
+                       sceList[[5]],
+                       sceList[[6]],
+                       sceList[[7]],
+                       sceList[[8]],
+                       sceList[[9]],
+                       sceList[[10]],
+                       sceList[[11]],
+                       sceList[[12]],
+                        sceList[[13]],
+                        sceList[[14]],
+                        sceList[[15]],
+                        sceList[[16]],
+                        sceList[[17]],
+                        sceList[[18]],
+                        sceList[[19]],
+                        sceList[[20]],
+                        sceList[[21]],
+                       sceList[[22]],
+                        sceList[[23]],
+                        sceList[[24]],
+                        sceList[[25]],
+                        sceList[[26]],
+                        sceList[[27]],
+                        sceList[[28]],
+                        sceList[[29]],
+                        sceList[[30]],
+                        sceList[[31]],
+                       sceList[[32]],
+                        sceList[[33]],
+                        sceList[[34]],
+                        sceList[[35]],
+                        sceList[[36]],
+                        sceList[[37]],
+                        sceList[[38]],
+                        sceList[[39]]),
+                 add.cell.ids = samples,
+                 project = "CRC")
+
+
+
+## 预处理
+sce.big <- subset(sce.big,DF.classifications=="Singlet")
+sce.big <- NormalizeData(sce.big, normalization.method = "LogNormalize", scale.factor = 1e4) 
+sce.big <- FindVariableFeatures(sce.big, selection.method = 'vst', nfeatures = 2000)
+##缩放
+all.genes <- rownames(sce.big)
+sce.big <- ScaleData(sce.big,verbose = FALSE)
+#sce.big1 <- SCTransform(sce.big,vars.to.regress = "percent.mt",verbose = FALSE,method = 'qpoisson')
+##PCA降维
+sce.big <- RunPCA(sce.big, features = VariableFeatures(object = sce.big))
+
+
+##批次效应
+
+sce.big <-  RunHarmony(sce.big, "orig.ident",
+                       plot_convergence = F,dims.use = 1:20) 
+sce.big <- FindNeighbors(sce.big, dims = 1:20,reduction = 'harmony')
+sce.big <- FindClusters(sce.big, resolution = 0.5)
+##resolution-0.5:20   resolution-0.8:22
+#clustree(sce.big@meta.data, prefix = "RNA_snn_res.")  ## 查看分群分辨率
+#sce.big <- RunTSNE(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+sce.big <- RunUMAP(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(sce.big,reduction = "umap",label=T,raster = FALSE)
+
+
+
+#sce.big.harmony <- IntegrateLayers(object = sce.big,method = HarmonyIntegration,orig.reduction = 'pca',
+#                                   new.reduction = 'harmony')
+
+#sce.big.harmony[['RNA']] <- JoinLayers(sce.big.harmony[['RNA']])
+#sce.big.harmony <- FindNeighbors(sce.big, dims = 1:20)
+#sce.big.harmony <- FindClusters(sce.big, resolution = 0.5)
+#sce.big <- RunTSNE(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+#sce.big.harmony <- RunUMAP(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+#DimPlot(sce.big.harmony,reduction = "umap",label=T,raster = FALSE)
+
+
+
+## 查看marker gene分布
+DotPlot(sce.big,features = c("EPCAM","CDH1","WFDC2","CDKN2A",    ##epithelial
+                                 "CD3D",'CD3E',"CD2","GNLY",    ##T/NK
+                                 'CD68','LYZ','CD14',    ##myeloid
+                                 #'CD68','CD163',    ##macrophage
+                                 #'S100A8','CSF3R',    ##monocyte
+                                 #'CD19','CD79A','JCHAIN',    ##B/plasma
+                                 "MS4A1","CD79A",    ##B
+                                 "JCHAIN","MZB1",    ##plasma
+                                 'COL1A1','POSTN',    ##fibroblast
+                                 'PLVAP','CDH5','EMCN',    ##EC
+                                 #'ACTA2','RGS5','MYH11',    
+                                 'CPA3','TPSD1','MS4A2'    #Granulocytes
+                                 ))+ scale_color_paletteer_c("grDevices::PRGn")
+
+## 差异基因list
+sce.big <- JoinLayers(sce.big)
+sce.big.markers <- FindAllMarkers(sce.big,logfc.threshold = 0.25,min.pct = 0.1,only.pos = TRUE,test.use = "wilcox")
+
+## markergene list
+##  COL1A1,COL1A2,DCN,SFRP4 fibroblast
+##  CD2,CD3D,CD3E,GNLY  NK/T
+##  FCGR2A,CSF3R,LYZ,S100A8 monocytes
+##  "CDKN2A","CDH1","EPCAM","WFDC2",    ##epithelial
+##  "CD14","CD68","CD163",    ##macrophages,C1QA,C1QB
+##  "ACTA2","RGS5","MYH11",    ##smooth muscle
+##  "CDH5","EMCN","PECAM1",    ##EC
+##  "JCHAIN","MZB1",    ##plasma
+##  "MS4A1","CD79A",    ##B
+##  "CD1C","LAMP3",    ##DC
+##  "CPA3","TPSAB1"    ##mast cells
+
+## annotation ##
+cluster_labs <- c("0"="T/NK cells",
+                  "1"="T/NK cells",
+                  "2"="Plasma cells",
+                  "3"="Epithelial cells",
+                  "4"="Myeloid cells",
+                  "5"="Epithelial cells",
+                  "6"="Myeloid cells",
+                  "7"="T/NK cells",
+                  "8"="Epithelial cells",
+                  "9"="Fibroblast cells",
+                  "10"="B cells",
+                  "11"="Plasma cells",
+                  "12"="Epithelial cells",
+                  "13"="Endothelial cells",
+                  "14"="T/NK cells",
+                  "15"="Granulocytes cells",
+                  "16"="Myeloid cells",
+                  "17"="Myeloid cells",
+                  "18"="Plasma cells",
+                  "19"="Plasma cells")
+sce.big@meta.data$annotation <- cluster_labs[sce.big@meta.data$seurat_clusters]
+DimPlot(sce.big,reduction = "umap",label=T,group.by = "annotation")+ scale_color_paletteer_d("MoMAColors::Klein")
+
+
+## define sample resource
+
+sample_resource <- c("Pt01 _ T1"="primary tumor",
+                  "Pt01 _ T2"="liver metastasis",
+                  "Pt02 _ T1"="primary tumor",
+                  "Pt02 _ T2"="liver metastasis",
+                  "Pt03 _ T1"="primary tumor",
+                  "Pt03 _ T2"="liver metastasis",
+                  "Pt04 _ T1"="primary tumor",
+                  "Pt04 _ T2"="liver metastasis",
+                  "Pt05 _ T1"="primary tumor",
+                  "Pt05 _ T2"="liver metastasis",
+                  "Pt05 _ T3"="liver metastasis",
+                  "Pt06 _ T1"="primary tumor",
+                  "Pt06 _ T2"="liver metastasis",
+                  "Pt06 _ T3"="liver metastasis",
+                  "Pt07 _ T1"="primary tumor",
+                  "Pt07 _ T2"="liver metastasis",
+                  "Pt08 _ T1"="primary tumor",
+                  "Pt08 _ T2"="primary tumor",
+                  "Pt08 _ T3"="liver metastasis",
+                  "Pt08 _ T4"="liver metastasis",
+                  "Pt09 _ T1"="primary tumor",
+                  "Pt10 _ T1"="primary tumor",
+                  "Pt10 _ T2"="liver metastasis",
+                  "Pt11 _ T1"="primary tumor",
+                  "Pt11 _ T2"="liver metastasis",
+                  "Pt13 _ T1"="primary tumor",
+                  "Pt13 _ Z1"="colon adjacent tissue",
+                  "Pt15 _ T1"="primary tumor",
+                  "Pt15 _ T2"="liver metastasis",
+                  "Pt15 _ Z1"="colon adjacent tissue",
+                  "Pt16 _ T1"="liver metastasis",
+                  "Pt16 _ Z1"="liver adjacent tissue",
+                  "Pt17 _ T1"="primary tumor",
+                  "Pt17 _ T2"="liver metastasis",
+                  "Pt17 _ Z1"="colon adjacent tissue",
+                  "Pt18 _ T1"="primary tumor",
+                  "Pt18 _ T2"="liver metastasis",
+                  "Pt18 _ Z1"="colon adjacent tissue",
+                  "Pt18 _ Z2"="liver adjacent tissue")
+sce.big@meta.data$sample_orig <- sample_resource[sce.big@meta.data$orig.ident]
+
+## all cell ratio
+Cellratio <- prop.table(table(sce.big@meta.data$annotation, sce.big@meta.data$sample_orig), margin = 2)#计算各组样本不同细胞群比例
+Cellratio <- as.data.frame(Cellratio)
+colourCount = length(unique(Cellratio$Var1))
+Freq_change <- c('colon adjacent tissue','primary tumor','liver adjacent tissue','liver metastasis')
+Cellratio$Var2 <- factor(Cellratio$Var2,ordered=TRUE,levels=Freq_change)
+
+ggplot(data = Cellratio, aes(x =Var2, y = Freq, fill =  Var1)) +
+  geom_bar(stat = "identity", width=0.8,position="fill")+
+  ##显示数值
+  #geom_text(size = 3, position = position_stack(vjust = 0.5),aes(label=sprintf("%0.2f", round(Freq, digits = 2))))+
+  scale_fill_paletteer_d("MoMAColors::Klein") +
+  theme_bw()+
+  theme(panel.grid =element_blank()) +
+  labs(x="",y="Ratio")+
+  ####用来将y轴移动位置
+  theme(axis.text.y = element_text(size=12, colour = "black"))+
+  theme(axis.text.x = element_text(size=12, colour = "black"))+
+  theme(
+    axis.text.x.bottom = element_text(hjust = 1, vjust = 1, angle = 45)
+  ) 
+
+
+
+##分患者分析
+sample_patient <- c("Pt01 _ T1"="Pt01",
+                     "Pt01 _ T2"="Pt01",
+                     "Pt02 _ T1"="Pt02",
+                     "Pt02 _ T2"="Pt02",
+                     "Pt03 _ T1"="Pt03",
+                     "Pt03 _ T2"="Pt03",
+                     "Pt04 _ T1"="Pt04",
+                     "Pt04 _ T2"="Pt04",
+                     "Pt05 _ T1"="Pt05",
+                     "Pt05 _ T2"="Pt05",
+                     "Pt05 _ T3"="Pt05",
+                     "Pt06 _ T1"="Pt06",
+                     "Pt06 _ T2"="Pt06",
+                     "Pt06 _ T3"="Pt06",
+                     "Pt07 _ T1"="Pt07",
+                     "Pt07 _ T2"="Pt07",
+                     "Pt08 _ T1"="Pt08",
+                     "Pt08 _ T2"="Pt08",
+                     "Pt08 _ T3"="Pt08",
+                     "Pt08 _ T4"="Pt08",
+                     "Pt09 _ T1"="Pt09",
+                     "Pt10 _ T1"="Pt10",
+                     "Pt10 _ T2"="Pt10",
+                     "Pt11 _ T1"="Pt11",
+                     "Pt11 _ T2"="Pt11",
+                     "Pt13 _ T1"="Pt13",
+                     "Pt13 _ Z1"="Pt13",
+                     "Pt15 _ T1"="Pt15",
+                     "Pt15 _ T2"="Pt15",
+                     "Pt15 _ Z1"="Pt15",
+                     "Pt16 _ T1"="Pt16",
+                     "Pt16 _ Z1"="Pt16",
+                     "Pt17 _ T1"="Pt17",
+                     "Pt17 _ T2"="Pt17",
+                     "Pt17 _ Z1"="Pt17",
+                     "Pt18 _ T1"="Pt18",
+                     "Pt18 _ T2"="Pt18",
+                     "Pt18 _ Z1"="Pt18",
+                     "Pt18 _ Z2"="Pt18")
+sce.big@meta.data$sample_patient <- sample_patient[sce.big@meta.data$sample_name]
+# 取得原始 counts
+counts_all <- LayerData(
+  sce.big,
+  assay = "RNA",
+  layer = "counts"
+)
+# 确认细胞名称与元数据一致
+meta_patient <- sce.big@meta.data[
+  colnames(counts_all),
+  ,
+  drop = FALSE
+]
+# 仅保留原发肿瘤和肝转移
+keep_cells <- meta_patient$sample_orig %in% c(
+  "primary tumor",
+  "liver metastasis"
+)
+meta_patient <- meta_patient[keep_cells, , drop = FALSE]
+counts_all <- counts_all[, keep_cells, drop = FALSE]
+meta_patient$sample_orig <- as.character(meta_patient$sample_orig)
+# 构造患者-组织类别组合
+meta_patient$pb_id <- paste(
+  meta_patient$sample_patient,
+  meta_patient$sample_orig,
+  sep = "__"
+)
+# 统计每个患者-组织类别-细胞类型的细胞数量
+cell_n <- meta_patient %>%
+  count(
+    sample_patient,
+    sample_orig,
+    annotation,
+    name = "n_cells"
+  )
+# 仅保留细胞数达到预设阈值的组合
+min_cells <- 15
+
+eligible <- cell_n %>%
+  filter(n_cells >= min_cells) %>%
+  mutate(
+    pb_id = paste(
+      sample_patient,
+      sample_orig,
+      sep = "__"
+    )
+  )
+# 记录差异表达结果
+de_list <- list()
+
+# 逐一分析每种细胞类型
+celltypes <- unique(as.character(meta_patient$annotation))
+
+
+# 逐一分析每种细胞类型
+celltypes <- unique(as.character(meta_patient$annotation))
+
+for (ct in celltypes) {
+  message("Analyzing cell type: ", ct)
+  # 该细胞类型中符合过滤标准的患者-组织组合
+  groups_ct <- eligible %>%
+    filter(annotation == ct)
+  
+  if (nrow(groups_ct) == 0) next
+  
+  # 选择对应细胞
+  cells_ct <- rownames(meta_patient)[
+    meta_patient$annotation == ct &
+      meta_patient$pb_id %in% groups_ct$pb_id
+  ]
+  
+  if (length(cells_ct) == 0) next
+  
+  # 按患者-组织组合建立聚合矩阵
+  group_factor <- factor(
+    meta_patient[cells_ct, "pb_id"],
+    levels = groups_ct$pb_id
+  )
+  
+  aggregation_matrix <- sparse.model.matrix(
+    ~ 0 + group_factor
+  )
+  
+  rownames(aggregation_matrix) <- cells_ct
+  
+  pb_counts <- counts_all[
+    ,
+    cells_ct,
+    drop = FALSE
+  ] %*% aggregation_matrix
+  
+  colnames(pb_counts) <- groups_ct$pb_id
+  
+  # 建立 pseudobulk 元数据
+  pb_meta <- groups_ct %>%
+    select(
+      pb_id,
+      sample_patient,
+      sample_orig,
+      n_cells
+    ) %>%
+    distinct()
+  
+  pb_meta <- pb_meta[
+    match(colnames(pb_counts), pb_meta$pb_id),
+    ,
+    drop = FALSE
+  ]
+  
+  # 检查是否有重复的患者-组织组合
+  stopifnot(!anyDuplicated(
+    pb_meta[, c("sample_patient", "sample_orig")]
+  ))
+  
+  # 仅保留两种组织都达到过滤标准的患者
+  tab <- table(
+    pb_meta$sample_patient,
+    factor(
+      pb_meta$sample_orig,
+      levels = c(
+        "primary tumor",
+        "liver metastasis"
+      )
+    )
+  )
+  
+  paired_ids <- rownames(tab)[
+    tab[, "primary tumor"] > 0 &
+      tab[, "liver metastasis"] > 0
+  ]
+  
+  if (length(paired_ids) < 3) {
+    message(
+      "Skipping ", ct,
+      ": fewer than 3 eligible paired patients."
+    )
+    next
+  }
+  
+  keep_pb <- pb_meta$sample_patient %in% paired_ids
+  
+  pb_counts <- pb_counts[, keep_pb, drop = FALSE]
+  pb_meta <- droplevels(
+    pb_meta[keep_pb, , drop = FALSE]
+  )
+  
+  # 检查每名患者是否恰好有两种组织
+  pair_tab <- table(
+    pb_meta$sample_patient,
+    factor(
+      pb_meta$sample_orig,
+      levels = c(
+        "primary tumor",
+        "liver metastasis"
+      )
+    )
+  )
+  
+  if (!all(pair_tab == 1)) {
+    stop(
+      "存在不完整或重复的配对记录：",
+      ct
+    )
+  }
+  
+  # 设置参考组
+  pb_meta$sample_orig <- factor(
+    pb_meta$sample_orig,
+    levels = c(
+      "primary tumor",
+      "liver metastasis"
+    )
+  )
+  
+  pb_meta$sample_patient <- factor(
+    pb_meta$sample_patient
+  )
+  
+  # 配对模型
+  design <- model.matrix(
+    ~ sample_patient + sample_orig,
+    data = pb_meta
+  )
+  
+  if (qr(design)$rank < ncol(design)) {
+    message(
+      "Skipping ", ct,
+      ": design matrix is not full rank."
+    )
+    next
+  }
+  
+  # edgeR 分析
+  y <- DGEList(
+    counts = as.matrix(pb_counts)
+  )
+  
+  keep_genes <- filterByExpr(
+    y,
+    design = design
+  )
+  
+  y <- y[
+    keep_genes,
+    ,
+    keep.lib.sizes = FALSE
+  ]
+  
+  if (nrow(y) == 0) next
+  
+  y <- calcNormFactors(y)
+  
+  y <- estimateDisp(
+    y,
+    design
+  )
+  
+  fit <- glmQLFit(
+    y,
+    design,
+    robust = TRUE
+  )
+  
+  
+  qlf <- edgeR::glmQLFTest(
+    fit,
+    coef = match("sample_origliver metastasis", colnames(design))
+  )
+  
+  res <- topTags(
+    qlf,
+    n = Inf,
+    adjust.method = "BH"
+  )$table
+  
+  res$gene <- rownames(res)
+  res$celltype <- ct
+  res$n_paired_patients <- length(paired_ids)
+  
+  de_list[[ct]] <- res
+}
+  
+# 合并所有细胞类型的结果
+de_results <- bind_rows(de_list)
+de_results <- de_results[de_results$FDR < 0.05,]
+
+
+##计算不同样本不同细胞的占比
+meta_patient2 <- sce.big@meta.data %>%
+  filter(
+    sample_orig %in% c(
+      "primary tumor",
+      "liver metastasis"
+    )
+  ) %>%
+  mutate(
+    sample_orig = factor(
+      sample_orig,
+      levels = c(
+        "primary tumor",
+        "liver metastasis"
+      )
+    )
+  )
+
+# 每位患者、每种组织类别的总细胞数
+total_cells <- meta_patient2 %>%
+  count(
+    sample_patient,
+    sample_orig,
+    name = "total_cells"
+  )
+
+# 每位患者、每种组织类别、每种细胞类型的细胞数
+cell_counts <- meta_patient2 %>%
+  count(
+    sample_patient,
+    sample_orig,
+    annotation,
+    name = "n_cells"
+  )
+
+# 计算比例
+abundance <- cell_counts %>%
+  left_join(
+    total_cells,
+    by = c("sample_patient", "sample_orig")
+  ) %>%
+  mutate(
+    proportion = n_cells / total_cells
+  )
+
+
+##配对分析
+
+paired_test <- function(dat, cell_name) {
+  
+  tmp <- dat %>%
+    filter(celltype == cell_name) %>%
+    select(patient, tissue, proportion) %>%
+    pivot_wider(
+      names_from = tissue,
+      values_from = proportion
+    ) %>%
+    drop_na(`primary tumor`, `liver metastasis`)
+  
+  test <- wilcox.test(
+    tmp$`primary tumor`,
+    tmp$`liver metastasis`,
+    paired = TRUE,
+    exact = TRUE,
+    correct = FALSE
+  )
+  
+  data.frame(
+    Cell = cell_name,
+    N = nrow(tmp),
+    Primary_median = median(tmp$`primary tumor`),
+    Metastasis_median = median(tmp$`liver metastasis`),
+    Median_difference = median(
+      tmp$`liver metastasis` - tmp$`primary tumor`
+    ),
+    P_value = test$p.value
+  )
+}
+
+res_B <- paired_test(abundance, "B cells")
+res_Plasma <- paired_test(abundance, "Plasma cells")
+
+rbind(res_B, res_Plasma)
+
+
+
+
+  
+
+#### 细胞通讯
+data.input <- GetAssayData(sce.big, layer = "data", assay = "RNA")
+Idents(sce.big) <- "annotation"
+meta <- (data.frame(labels = Idents(sce.big)))
+cellchat <- createCellChat(object = data.input, 
+                           meta = meta, 
+                           group.by = "labels")
+cellchat <- addMeta(cellchat, meta = meta)
+cellchat <- setIdent(cellchat, ident.use = "labels") 
+levels(cellchat@idents) 
+groupSize <- as.numeric(table(cellchat@idents)) 
+
+CellChatDB <- CellChatDB.human
+###直接使用CellChatDB全库进行细胞通讯分析
+CellChatDB.use <- subsetDB(CellChatDB, 
+                           search = "Secreted Signaling", 
+                           key = "annotation") # use Secreted Signaling
+cellchat@DB <- CellChatDB.use
+###预处理数据
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 8)
+options(future.globals.maxSize = 8 * 1024^3)
+cellchat <- identifyOverExpressedGenes(cellchat)###已存环境allcell_cellchat.RData
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- projectData(cellchat, PPI.human) 
+#根据表达值推测细胞互作的概率
+cellchat <- computeCommunProb(cellchat, raw.use = FALSE, population.size = TRUE)#如果不想用上一步PPI矫正的结果，raw.use = TRUE
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+df.net <- subsetCommunication(cellchat)
+##通过计算链路的数量或汇总通信概率来计算细胞间的聚合通信网络。
+cellchat <- computeCommunProbPathway(cellchat)
+df.netp <- subsetCommunication(cellchat, slot.name = "netP")
+
+##统计所有细胞群总体观-细胞互作数量与强度统计分析
+cellchat <- aggregateNet(cellchat)
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, 
+                 label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, 
+                 label.edge= F, title.name = "Interaction weights/strength")
+##查看固定细胞类型互作图
+mat <- cellchat@net$count
+mat <- cellchat@net$weight
+par(mfrow = c(1,2), xpd=TRUE)
+##3和5是B和plasma细胞
+mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+mat2[5, ] <- mat[5, ]
+netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, arrow.width = 0.2,
+                   arrow.size = 0.1, edge.weight.max = max(mat))
+##多个通路通讯
+netVisual_bubble(cellchat, sources.use = c(3,5), 
+                     targets.use = c(2,6,8), remove.isolate = FALSE)
