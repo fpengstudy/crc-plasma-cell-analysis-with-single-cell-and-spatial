@@ -1,0 +1,523 @@
+####  B/plasma subcluster
+
+bcell <- subset(sce.big,annotation=="B cells" | annotation=="Plasma cells")
+bcell <- NormalizeData(bcell, normalization.method = "LogNormalize", scale.factor = 1e4) 
+bcell <- FindVariableFeatures(bcell, selection.method = 'vst', nfeatures = 2000)
+##缩放
+bcell <- ScaleData(bcell,verbose = FALSE)
+##PCA降维
+bcell <- RunPCA(bcell, features = VariableFeatures(object = bcell))
+
+bcell <-  RunHarmony(bcell, "orig.ident",
+                       plot_convergence = F,dims.use = 1:20) 
+bcell <- FindNeighbors(bcell, dims = 1:20,reduction = 'harmony')
+bcell <- FindClusters(bcell, resolution = 0.8)
+##resolution-0.5:20   resolution-0.8:22
+#clustree(sce.big@meta.data, prefix = "RNA_snn_res.")  ## 查看分群分辨率
+#sce.big <- RunTSNE(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+bcell <- RunUMAP(object = bcell, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(bcell,reduction = "umap",label=T,raster = FALSE)
+
+
+bcell.markers <- FindAllMarkers(bcell,logfc.threshold = 0.25,min.pct = 0.1,only.pos = TRUE,test.use = "wilcox")
+
+
+
+####navie  "IGHD","IL4R","FCER2","TCL1A"
+####memory  "CD27"
+
+bcluster_labs <- c("0"="IGHA1+ Plasma cells",
+                  "1"="IGHA1+ Plasma cells",
+                  "2"="Memory B cells",
+                  "3"="IGHA1+ Plasma cells",
+                  "4"="IGHA1+ Plasma cells",
+                  "5"="IGHA1+ Plasma cells",
+                  "6"="TFF3+ Plasma cells",
+                  "7"="Naive B cells",
+                  "8"="IGHA1+ Plasma cells",
+                  "9"="IGHA1+ Plasma cells",
+                  "10"="IGHA1+ Plasma cells",
+                  "11"="IGHA1+ Plasma cells",
+                  "12"="TFF3+ Plasma cells",
+                  "13"="Memory B cells",
+                  "14"="LGALS4+ Plasma cells")
+bcell@meta.data$b_annotation <- bcluster_labs[bcell@meta.data$seurat_clusters]
+DimPlot(bcell,reduction = "umap",label=T,group.by = "b_annotation")+ scale_color_d3()
+
+
+#### b subcluster plots
+DotPlot(bcell,features = c("IGF2",'SPP1','IFITM3','TFF3',
+                           'IGHA1','JCHAIN','CCR10','IGKC',
+                           "IGHD","IL4R","FCER2","TCL1A",
+                           "CD27","LTB",'CD82','COTL1',
+                           'LGALS4','LGALS2','PHGR1','LGALS3'))+RotatedAxis()+scale_color_paletteer_c("grDevices::PRGn")
+
+Cellratio <- prop.table(table(bcell@meta.data$b_annotation, bcell@meta.data$sample_orig), margin = 2)#计算各组样本不同细胞群比例
+Cellratio <- as.data.frame(Cellratio)
+Freq_change <- c('colon adjacent tissue','primary tumor','liver adjacent tissue','liver metastasis')
+Cellratio$Var2 <- factor(Cellratio$Var2,ordered=TRUE,levels=Freq_change)
+ggplot(Cellratio,aes(x=Var1,y=Freq,fill=Var2))+
+  geom_bar(stat = 'identity',position = position_dodge(),
+           color="black",width = .8)+
+  theme_bw()
+  
+  
+  
+###修改名字，不然monocel2源码取名和之前一样，不能运行
+colnames(bcell@meta.data)[11] <- "orig_samplename"
+
+
+#### monocle2
+library(monocle)
+library(igraph)
+expr_matrix <- as(as.matrix(bcell@assays$RNA$counts), 'sparseMatrix')
+p_data <- bcell@meta.data
+#p_data$celltype <- bcell@active.ident
+pd <- new('AnnotatedDataFrame', data = p_data)
+
+f_data <- data.frame(gene_short_name = row.names(expr_matrix),row.names = row.names(expr_matrix))
+fd <- new('AnnotatedDataFrame', data = f_data)
+##只存在一个cds##否则会报错
+cds <- newCellDataSet(expr_matrix, phenoData = pd,featureData = fd,lowerDetectionLimit = 0.5,expressionFamily = negbinomial.size())
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds,cores=1, relative_expr = TRUE)
+
+##seurat genes
+express_genes <- VariableFeatures(bcell)
+cds<- setOrderingFilter(cds, express_genes)
+plot_ordering_genes(cds)
+
+##cluster genes
+#deg.cluster <- FindAllMarkers(bcell)
+express_genes <- subset(bcell.markers,p_val_adj<0.05)$gene
+cds <- setOrderingFilter(cds,express_genes)
+plot_ordering_genes(cds)
+
+##monocle genes
+disp_table <- dispersionTable(cds)
+disp.genes <- subset(disp_table,mean_expression >= 0.1 & dispersion_empirical >= 1 *dispersion_fit)$gene_id
+cds <- setOrderingFilter(cds,disp.genes)
+plot_ordering_genes(cds)
+####b cell的轨迹图不好看##
+
+cds <- reduceDimension(cds,max_components = 2,method = 'DDRTree')
+cds <- orderCells(cds)
+
+plot_cell_trajectory(cds,color_by="Pseudotime",size=1,show_backbone=TRUE)
+
+plot_cell_trajectory(cds,color_by="b_annotation",size=1,show_backbone=TRUE)
+
+plot_cell_trajectory(cds, color_by = "State", size=1,show_backbone=TRUE)
+
+plot_cell_trajectory(cds, markers = "NME2", use_color_gradient = T)
+
+
+
+
+#### TFF3 subcluster  ####
+
+tff3_cells <- subset(bcell,b_annotation=="TFF3+ Plasma cells")
+tff3_markes <- FindAllMarkers(tff3_cells,logfc.threshold = 0.25,min.pct = 0.1,only.pos = TRUE,test.use = "wilcox")
+top50 <- tff3_markes %>% group_by(cluster) %>% top_n(n = 60,wt = avg_log2FC)##60有KEGG
+
+
+tff3_cells <- NormalizeData(tff3_cells, normalization.method = "LogNormalize", scale.factor = 1e4) 
+tff3_cells <- FindVariableFeatures(tff3_cells, selection.method = 'vst', nfeatures = 2000)
+##缩放
+tff3_cells <- ScaleData(tff3_cells,verbose = FALSE)
+##PCA降维
+tff3_cells <- RunPCA(tff3_cells, features = VariableFeatures(object = tff3_cells))
+
+tff3_cells <-  RunHarmony(tff3_cells, "orig.ident",
+                     plot_convergence = F,dims.use = 1:20) 
+tff3_cells <- FindNeighbors(tff3_cells, dims = 1:20,reduction = 'harmony')
+tff3_cells <- FindClusters(tff3_cells, resolution = 0.8)
+#clustree(sce.big@meta.data, prefix = "RNA_snn_res.")  ## 查看分群分辨率
+#sce.big <- RunTSNE(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+tff3_cells <- RunUMAP(object = tff3_cells, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(tff3_cells,reduction = "umap",label=T,raster = FALSE)
+
+
+
+####GO/KEGG
+sig.markers=subset(top50,top50$cluster=="primary tumor")
+go_ythdf2 <- sig.markers$gene
+go_ythdf2_id_trance <- bitr(go_ythdf2,fromType = "SYMBOL",toType = "ENSEMBL",OrgDb = "org.Hs.eg.db",drop = T)
+f <- as.data.frame(go_ythdf2_id_trance[,2])
+colnames(f)[1] <- ''
+colnames(f) <- "V1"
+EG2Ensembl=toTable(org.Hs.egENSEMBL)
+f=f$V1  
+geneLists=data.frame(ensembl_id=f)
+results=merge(geneLists,EG2Ensembl,by='ensembl_id',all.x=T)
+id=na.omit(results$gene_id)
+All <- enrichGO(OrgDb="org.Hs.eg.db", gene = id, ont = "ALL",  readable= TRUE) 
+barplot(All,split="ONTOLOGY",title="Enrichment GO Up-Gene",font.size = 10)+ facet_grid(ONTOLOGY~.,scale="free")
+
+
+KEGG <- enrichKEGG(gene= id, organism  = 'hsa', pvalueCutoff = 0.05) 
+dotplot(KEGG,font.size=12)
+
+
+
+#### GSVA
+tff3_expr <- tff3_cells@assays$RNA$counts
+tff3_expr <- as.matrix(tff3_expr)
+
+## 50 hallmarker
+mdb_c2 <- msigdbr(species = "Homo sapiens", category = "H")
+fgsea_sets = mdb_c2 [grep("^HALLMARK",mdb_c2 $gs_name),] %>% split(x = .$gene_symbol, f = .$gs_name)
+## GSVA
+gsva.res <- gsva(tff3_expr,fgsea_sets,method="gsva")
+
+##compare subepi
+gsva.data <- as.data.frame(gsva.res)
+gsva.data <- t(gsva.data)
+##merge subepi
+tff3_subdata <- tff3_cells@meta.data["sample_orig"]
+geneset <- merge(tff3_subdata, gsva.data, by = "row.names", all = T)
+
+##heatmap
+average_geneset <- aggregate(geneset, by=list(type=geneset$sample_orig),mean)
+rownames(average_geneset) <- average_geneset$type
+average_geneset <- average_geneset[4:53]
+average_geneset_t <- t(average_geneset)
+pheatmap(average_geneset_t,cluster_cols = F,cluster_rows = T,      #行聚类，列不聚类
+         show_rownames = T,angle_col = "90",       #不显示行名
+         show_colnames = T,angle_row="30",      #显示列明 angle_row="15"，行名旋转15度，列明相似
+         #annotation_row = annotationc,  #对列进行注释即对列进行分组
+         scale="row",             #将数据按行进行标准化
+         cellwidth=15 ,         #设置格子大小 cellheigt=""设置格子高
+         cellheight = 15,         #设置格子高
+         border=F,               #不显示小格子边框
+         color = colorRampPalette(c("#5773CCFF","#F6FAFCFF","#FFB900FF"))(100))
+
+
+
+
+
+####  scMetabolism 相关分析
+
+countexp.Seurat_test <- sc.metabolism.Seurat(obj = tff3_cells,  #Seuratde单细胞object
+                                        method = "AUCell", 
+                                        imputation = F, 
+                                        ncores = 2, 
+                                        metabolism.type = "KEGG")
+#提取score结果
+score <- countexp.Seurat_test@assays$METABOLISM$score
+score[1:4,1:4]
+#将score中barcode的点转为下划线
+score_change <- score %>% 
+  select_all(~str_replace_all(., "\\.", "-"))  #基因ID不规范会报错,下划线替换-
+#确定细胞barcode
+identical(colnames(score_change) , rownames(countexp.Seurat_test@meta.data))
+#[1] TRUE
+countexp.Seurat_test@meta.data <- cbind(countexp.Seurat_test@meta.data,t(score_change) )
+
+#可以直接使用Seurat的相关函数
+p1 <- FeaturePlot(countexp.Seurat_test,features = "Glycolysis / Gluconeogenesis")
+p2 <- VlnPlot(countexp.Seurat_test,features = "Glycolysis / Gluconeogenesis")
+p1 + p2
+
+
+df <- countexp.Seurat_test@meta.data
+#19列开始是代谢通路的得分，按照celltype计算均值
+avg_df = aggregate(df[,14:ncol(df)],
+                   list(df$sample_orig),
+                   mean)
+
+rownames(avg_df) <- avg_df$Group.1
+avg_df <- avg_df[,-1]
+
+pheatmap(t(avg_df), 
+         show_colnames = T,
+         scale='row', 
+         cluster_rows = T,
+         color=colorRampPalette(c('#1A5592','white',"#B83D3D"))(100),
+         cluster_cols = T)
+
+exp <- apply(avg_df, 2, scale)
+rownames(exp) <- rownames(avg_df)
+
+Heatmap(t(exp),
+        column_title = "state_gsva",
+        col = colorRampPalette(c('#1A5592','white',"#B83D3D"))(100),
+        name= "gsva ",
+        show_row_names = TRUE,
+        show_column_names = TRUE)
+
+
+##查找相关代谢通路
+orig_score <- df[,c(12,14:ncol(df))]
+
+four_stage_FDR <- c()
+primary_vs_metastasis <- c()
+primary_vs_colon <- c()
+meta_vs_colon <- c()
+##存在不符合正态分布数值，使用kruskal.test
+for (i in 2:ncol(orig_score)){
+  score_name <- colnames(orig_score)[i]
+  #fit <- aov(orig_score[[score_name]]~orig_score$sample_orig)
+  #FDR_value <- summary(fit)[[1]]["Pr(>F)"][1,]
+  ## 使用kruskal.test的四个阶段差异显著的通路
+  fit <- kruskal.test(orig_score[[score_name]]~orig_score$sample_orig, data=orig_score)
+  p_value <- fit[[3]]
+  four_stage_FDR <- c(four_stage_FDR,p_value)
+  ## 使用pairwise.t.test对primary和metastasis差异显著的通路
+  pairwise_value <- pairwise.t.test(orig_score[[score_name]],orig_score$sample_orig,p.adj = "bonf",data=orig_score)
+  pairwise_value_p <- pairwise_value[[3]][3,3]
+  primary_vs_metastasis <- c(primary_vs_metastasis,pairwise_value_p)
+
+  parwise_value_privs_colon <- pairwise_value[[3]][3,1]
+  primary_vs_colon <- c(primary_vs_colon,parwise_value_privs_colon)
+  parwise_value_metavs_colon <- pairwise_value[[3]][2,2]
+  meta_vs_colon <- c(meta_vs_colon,parwise_value_metavs_colon)
+  
+}
+score_total <- data.frame("PATHWAY"= c(colnames(orig_score)[2:86]),
+                          "four_stage_FDR" = four_stage_FDR,
+                          "primary_vs_metastasis"= primary_vs_metastasis,
+                          "primary_vs_colon" = primary_vs_colon,
+                          "meta_vs_colon" = meta_vs_colon)
+
+significant_value <- subset(score_total,four_stage_FDR<=0.05 & primary_vs_metastasis <= 0.05)
+input.pathway <- significant_value$PATHWAY
+DotPlot.metabolism(obj = countexp.Seurat_test, 
+                   pathway = input.pathway, 
+                   phenotype = "sample_orig",
+                   norm = "y")
+
+significant_value_privs_colon <- subset(score_total, primary_vs_colon<= 0.05)
+DotPlot.metabolism(obj = countexp.Seurat_test, 
+                   pathway = significant_value_privs_colon$PATHWAY, 
+                   phenotype = "sample_orig",
+                   norm = "y")
+
+significant_value_metavs_colon <- subset(score_total, meta_vs_colon<= 0.05)
+DotPlot.metabolism(obj = countexp.Seurat_test, 
+                   pathway = significant_value_metavs_colon$PATHWAY, 
+                   phenotype = "sample_orig",
+                   norm = "y")
+
+
+##查找特定通路基因，寻找差异基因
+kegg_sets <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:KEGG")
+sphingo_set <- subset(kegg_sets, gs_name == "KEGG_SPHINGOLIPID_METABOLISM"| gs_name =="KEGG_RIBOFLAVIN_METABOLISM" | gs_name =="KEGG_SULFUR_METABOLISM")
+sphingo_genes <- unique(sphingo_set$gene_symbol)
+
+KEGG_SPHINGOLIPID_METABOLISM_genesets <- c("SPTLC1","NEU3","DEGS2","ACER1","NEU4","SGPP2","SGMS2","KDSR","GALC","SGMS1","GBA1","GLA","GLB1","ENPP7","ACER2","ARSA","ASAH1","NEU1","NEU2","ACER3","SMPD3","SMPD4","ASAH2","SPHK2","CERK","SMPD1","SMPD2","UGCG","UGT8","SGPP1","DEGS1","PLPP1","PLPP2","PLPP3","SPHK1","SGPL1","B4GALT6","GAL3ST1","SPTLC2")
+##去除ARSA过高表达的
+DotPlot(tff3_cells,features = c("SPTLC1","NEU3","DEGS2","ACER1","NEU4","SGPP2","SGMS2","KDSR","GALC","SGMS1","GLA","GLB1","ENPP7","ACER2","ASAH1","NEU1","ACER3","SMPD3","SMPD4","ASAH2","SPHK2","CERK","SMPD1","SMPD2","UGCG","UGT8","SGPP1","DEGS1","PLPP1","PLPP2","PLPP3","SPHK1","SGPL1","B4GALT6","GAL3ST1","SPTLC2"),group.by = "sample_orig")+RotatedAxis()+scale_color_steps(high = "red",low = "blue")
+
+
+
+####  TFF3 volcano
+##肿瘤和原发相比
+tff3_privsliver_markers <- FindMarkers(tff3_cells, ident.1 ="liver metastasis", ident.2 = "primary tumor", min.pct = 0.25)
+
+tff3_privsliver_markers <- tff3_privsliver_markers %>%
+  mutate(Difference = pct.1 - pct.2) %>% 
+  rownames_to_column("gene")
+
+log2FC = 0.5
+padj = 0.05 
+tff3_privsliver_markers$threshold="ns";
+tff3_privsliver_markers[which(tff3_privsliver_markers$avg_log2FC  > log2FC & tff3_privsliver_markers$p_val_adj <padj),]$threshold="up";
+tff3_privsliver_markers[which(tff3_privsliver_markers$avg_log2FC  < (-log2FC) & tff3_privsliver_markers$p_val_adj < padj),]$threshold="down";
+tff3_privsliver_markers$threshold=factor(tff3_privsliver_markers$threshold, levels=c('down','ns','up'))
+
+ggplot(tff3_privsliver_markers, aes(x=Difference, y=avg_log2FC, color = threshold)) + 
+  geom_point(size=1) + 
+  scale_color_manual(values=c( "blue","grey","red") ) + 
+  geom_label_repel(data=subset(tff3_privsliver_markers, avg_log2FC >= 0.5 & Difference >= 0.1 & p_val_adj <= 0.05), 
+                   aes(label=gene),  #添加label
+                   color="black", #设置label中标签的颜色
+                   segment.colour = "black",#设置label框的颜色
+                   label.padding = 0.1, 
+                   #max.overlaps = 200,
+                   segment.size = 0.3,  #框的大小
+                   size=4)+
+  geom_label_repel(data=subset(tff3_privsliver_markers, avg_log2FC <= -0.5 & Difference <= -0.1 & p_val_adj <= 0.05), 
+                   aes(label=gene), label.padding = 0.1, 
+                   color="black",
+                   segment.colour = "black",
+                   segment.size = 0.3, size=4)+
+  geom_vline(xintercept = 0.0,linetype=2)+
+  geom_hline(yintercept = 0,linetype=2)+
+  theme_classic()
+
+
+#10.23做
+##原发和原发癌旁比
+tff3_privsadjacent_markers <- FindMarkers(tff3_cells, ident.1 ="primary tumor", ident.2 = "colon adjacent tissue", min.pct = 0.25)
+#tff3_privsadjacent_markers$gene <- rownames(tff3_privsadjacent_markers)
+tff3_privsadjacent_markers <- tff3_privsadjacent_markers %>%
+  mutate(Difference = pct.1 - pct.2) %>% 
+  rownames_to_column("gene")
+tff3_privsadjacent_markers$threshold="ns";
+tff3_privsadjacent_markers[which(tff3_privsadjacent_markers$avg_log2FC  > log2FC & tff3_privsadjacent_markers$p_val_adj <padj),]$threshold="up";
+tff3_privsadjacent_markers[which(tff3_privsadjacent_markers$avg_log2FC  < (-log2FC) & tff3_privsadjacent_markers$p_val_adj < padj),]$threshold="down";
+tff3_privsadjacent_markers$threshold=factor(tff3_privsadjacent_markers$threshold, levels=c('down','ns','up'))
+
+##转移和转移癌旁比
+tff3_metasvsadjacent_markers <- FindMarkers(tff3_cells, ident.1 ="liver metastasis", ident.2 = "liver adjacent tissue", min.pct = 0.25)
+tff3_metasvsadjacent_markers <- tff3_metasvsadjacent_markers %>%
+  mutate(Difference = pct.1 - pct.2) %>% 
+  rownames_to_column("gene")
+tff3_metasvsadjacent_markers$threshold="ns";
+tff3_metasvsadjacent_markers[which(tff3_metasvsadjacent_markers$avg_log2FC  > log2FC & tff3_metasvsadjacent_markers$p_val_adj <padj),]$threshold="up";
+tff3_metasvsadjacent_markers[which(tff3_metasvsadjacent_markers$avg_log2FC  < (-log2FC) & tff3_metasvsadjacent_markers$p_val_adj < padj),]$threshold="down";
+tff3_metasvsadjacent_markers$threshold=factor(tff3_metasvsadjacent_markers$threshold, levels=c('down','ns','up'))
+
+#修改参数作图
+sig.markers=subset(tff3_privsliver_markers,threshold == "down")
+go_ythdf2 <- sig.markers$gene
+go_ythdf2_id_trance <- bitr(go_ythdf2,fromType = "SYMBOL",toType = "ENSEMBL",OrgDb = "org.Hs.eg.db",drop = T)
+f <- as.data.frame(go_ythdf2_id_trance[,2])
+colnames(f)[1] <- ''
+colnames(f) <- "V1"
+EG2Ensembl=toTable(org.Hs.egENSEMBL)
+f=f$V1  
+geneLists=data.frame(ensembl_id=f)
+results=merge(geneLists,EG2Ensembl,by='ensembl_id',all.x=T)
+id=na.omit(results$gene_id)
+All <- enrichGO(OrgDb="org.Hs.eg.db", gene = id, ont = "ALL",  readable= TRUE) 
+barplot(All,split="ONTOLOGY",title="Pri AND Liver DOWN-Gene",font.size = 10)+ facet_grid(ONTOLOGY~.,scale="free")
+
+
+KEGG <- enrichKEGG(gene= id, organism  = 'hsa', pvalueCutoff = 0.05) 
+dotplot(KEGG,font.size=12)
+
+##取原发vs癌旁和转移vs癌旁的UP/DOWN基因，看通路
+pri_tumor_up <- (subset(tff3_privsadjacent_markers,threshold=="down"))$gene
+liver_tumor_up <- (subset(tff3_metasvsadjacent_markers,threshold=="down"))$gene
+tumor_up <- intersect(pri_tumor_up,liver_tumor_up)
+
+
+##HSPA1A和HSPA1B中TCGA-COAD-489生存曲线存在差异，作图
+library(survival)
+library(survminer)
+HSPA1A_survival_file <- read.delim("~/R/CRC_39samples/HSPA1A_survival_file.txt")
+names(HSPA1A_survival_file)[names(HSPA1A_survival_file) == "gene.expression.RNAseq...STAR...FPKM.UQ..HSPA1A"] <- "HSPA1A_group"
+surv_obj <- Surv(time = HSPA1A_survival_file$OS.time, event = HSPA1A_survival_file$OS)
+fit <- survfit(surv_obj ~ HSPA1A_group, data = HSPA1A_survival_file)
+ggsurvplot(
+  fit,
+  data = HSPA1A_survival_file,
+  pval = TRUE,          # 显示log-rank检验p值
+  conf.int = TRUE,      # 显示置信区间
+  risk.table = TRUE,    # 显示风险表
+  risk.table.col = "strata",
+  linetype = "strata",  # 不同组不同线型
+  palette = "jco",      # 使用JCO杂志配色
+  title = "HSPA1A expression",
+  #xlab = "Time",
+  #ylab = "总体生存率",
+  legend.title = "HSPA1A",
+  legend.labs = c("high", "low"),
+  #break.time.by = 365,  # 按年分割X轴
+  #ggtheme = theme_bw()  # 使用黑白主题
+)
+
+surv_diff <- survdiff(surv_obj ~ HSPA1A_group, data = HSPA1A_survival_file)
+print(surv_diff)
+
+NME2_survival <- read.delim("~/R/CRC_39samples/NME2_survival.tsv")
+names(NME2_survival)[names(NME2_survival) == "gene.expression.RNAseq...IlluminaHiSeq..NME2"] <- "NME2_group"
+surv_obj_NME2 <- Surv(time = NME2_survival$OS.time, event = NME2_survival$OS)
+fit_NME2 <- survfit(surv_obj_NME2 ~ NME2_group, data = NME2_survival)
+ggsurvplot(
+  fit_NME2,
+  data = NME2_survival,
+  pval = TRUE,          # 显示log-rank检验p值
+  conf.int = TRUE,      # 显示置信区间
+  risk.table = TRUE,    # 显示风险表
+  risk.table.col = "strata",
+  linetype = "strata",  # 不同组不同线型
+  palette = "jco",      # 使用JCO杂志配色
+  title = "NME2 expression",
+  #xlab = "Time",
+  #ylab = "总体生存率",
+  legend.title = "HSPA1B",
+  legend.labs = c("high", "low"),
+  #break.time.by = 365,  # 按年分割X轴
+  #ggtheme = theme_bw()  # 使用黑白主题
+)
+
+
+
+####细胞周期分析####
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+bcell <- CellCycleScoring(bcell,s.features = s.genes , g2m.features = g2m.genes, set.ident = TRUE)
+#tff3_cells <- CellCycleScoring(tff3_cells,s.features = s.genes , g2m.features = g2m.genes, set.ident = TRUE)
+#### 把B cell中的周期分析加到plasma中
+cols_to_add <- c("S.Score", "G2M.Score","Phase")
+tff3_extended <- tff3_cells@meta.data
+for(col in cols_to_add) {
+  # 检查列是否存在于bcell@meta.data表中
+  if(col %in% colnames(bcell@meta.data)) {
+    tff3_extended[[col]] <- NA  # 先初始化为NA
+    # 只为有对应行名的行赋值
+    common_rows <- intersect(rownames(tff3_extended), rownames(bcell@meta.data))
+    tff3_extended[common_rows, col] <- bcell@meta.data[common_rows, col]
+  } else {
+    warning(paste("列", col, "在A表中不存在"))
+  }
+}
+
+
+
+####B/plasma细胞内部细胞通讯分析
+data.input <- GetAssayData(bcell, layer = "data", assay = "RNA")
+Idents(bcell) <- "b_annotation"
+meta <- (data.frame(labels = Idents(bcell)))
+cellchat <- createCellChat(object = data.input, 
+                           meta = meta, 
+                           group.by = "labels")
+cellchat <- addMeta(cellchat, meta = meta)
+cellchat <- setIdent(cellchat, ident.use = "labels") 
+levels(cellchat@idents) 
+groupSize <- as.numeric(table(cellchat@idents)) 
+
+CellChatDB <- CellChatDB.human
+###直接使用CellChatDB全库进行细胞通讯分析
+CellChatDB.use <- subsetDB(CellChatDB, 
+                           search = "Secreted Signaling", 
+                           key = "annotation") # use Secreted Signaling
+cellchat@DB <- CellChatDB.use
+###预处理数据
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 8)
+#options(future.globals.maxSize = 8 * 1024^3)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- projectData(cellchat, PPI.human) 
+#根据表达值推测细胞互作的概率
+cellchat <- computeCommunProb(cellchat, raw.use = FALSE, population.size = TRUE)#如果不想用上一步PPI矫正的结果，raw.use = TRUE
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+df.net <- subsetCommunication(cellchat)
+##通过计算链路的数量或汇总通信概率来计算细胞间的聚合通信网络。
+cellchat <- computeCommunProbPathway(cellchat)
+df.netp <- subsetCommunication(cellchat, slot.name = "netP")
+
+##统计所有细胞群总体观-细胞互作数量与强度统计分析
+cellchat <- aggregateNet(cellchat)
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, 
+                 label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, 
+                 label.edge= F, title.name = "Interaction weights/strength")
+##查看固定细胞类型互作图
+mat <- cellchat@net$count
+mat <- cellchat@net$weight
+par(mfrow = c(1,2), xpd=TRUE)
+mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+mat2[1, ] <- mat[1, ]
+netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, arrow.width = 0.2,
+                 arrow.size = 0.1, edge.weight.max = max(mat))
+##多个通路通讯
+netVisual_bubble(cellchat, sources.use = c(1), 
+                 targets.use = c(2,3,4,5), remove.isolate = FALSE)
+
