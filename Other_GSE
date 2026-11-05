@@ -1,0 +1,238 @@
+##尝试其他GEO中是否也有TFF3细胞
+
+library(Seurat)
+library(harmony)
+
+##  read file ##
+####  GSE225857 ####
+
+samples = list.files("~/raw_data/GSE225857_RAW")
+sceList = lapply(samples,function(pro){
+  folder=file.path("~/raw_data/GSE225857_RAW",pro)
+  CreateSeuratObject(counts = Read10X(folder),
+                     project = pro,
+                     min.cells = 3, min.features = 200)
+})
+
+library(DoubletFinder)
+for (i in 1:6) {
+  sceList[[i]][["percent.mt"]] <- PercentageFeatureSet(sceList[[i]], pattern = "^MT-")
+  #sceList[[i]][["percent.rb"]] <- PercentageFeatureSet(sceList[[i]], pattern = "^RP[SL]")
+  sceList[[i]] <- subset(sceList[[i]], subset =  nFeature_RNA > 200 & nFeature_RNA < 7500 & percent.mt < 10 & nCount_RNA < 100000 )
+  sceList[[i]] <- NormalizeData(sceList[[i]], normalization.method = "LogNormalize", scale.factor = 10000)
+  sceList[[i]] <- FindVariableFeatures(sceList[[i]], selection.method = "vst", nfeatures = 2000)
+  sceList[[i]] <- ScaleData(sceList[[i]])
+  sceList[[i]] <- RunPCA(sceList[[i]])
+  sceList[[i]] <- FindNeighbors(sceList[[i]], dims = 1:20)
+  sceList[[i]] <- FindClusters(sceList[[i]], resolution = 0.5)
+  sceList[[i]] <- RunUMAP(sceList[[i]],dims = 1:20)
+  
+  sweep.res.list <- paramSweep(sceList[[i]], PCs = 1:10, sct = FALSE)
+  #使用log标准化，sct参数设置为 sct = F（默认 ）,如使用SCT标准化方法，设置为T
+  for(j in 1:length(sweep.res.list)){
+    if(length(sweep.res.list[[j]]$pANN[is.nan(sweep.res.list[[j]]$pANN)]) != 0){
+      if(j != 1){
+        sweep.res.list[[j]] <- sweep.res.list[[j - 1]]
+      }else{
+        sweep.res.list[[j]] <- sweep.res.list[[j + 1]]
+      }
+    }
+  }
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  #可以看到最佳参数的点
+  pk_v <- as.numeric(as.character(bcmvn$pK))
+  pk_good <- pk_v[bcmvn$BCmetric==max(bcmvn$BCmetric)]
+  DoubletRate = 0.075
+  #10000细胞对应的doublets rate是～7.6%
+  homotypic.prop <- modelHomotypic(sceList[[i]]$seurat_clusters) #最好提供celltype，而不是seurat_clusters。
+  nExp_poi <- round(DoubletRate*ncol(sceList[[i]]))
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  #nExp_poi <- round(length(colnames(sceList[[i]]))*8*1e-6*length(colnames(sceList[[i]])))
+  sceList[[i]] <- doubletFinder(sceList[[i]], PCs = 1:10, pN = 0.25, pK = pk_good, nExp = nExp_poi.adj, reuse.pANN = FALSE, sct = FALSE)
+  
+}
+
+for (i in 1:6) {
+  colnames(sceList[[i]]@meta.data)[7]<- "pANN"
+  colnames(sceList[[i]]@meta.data)[8]<- "DF_classifications"
+}
+
+sce.big1 <- merge(sceList[[1]],
+                 y = c(sceList[[2]],
+                       sceList[[3]],
+                       sceList[[4]],
+                       sceList[[5]],
+                       sceList[[6]]),
+                 add.cell.ids = samples,
+                 project = "CRC_GSE225857")
+
+## 预处理
+sce.big1 <- subset(sce.big1,DF_classifications=="Singlet")
+sce.big1 <- NormalizeData(sce.big1, normalization.method = "LogNormalize", scale.factor = 1e4) 
+sce.big1 <- FindVariableFeatures(sce.big1, selection.method = 'vst', nfeatures = 2000)
+##缩放
+all.genes <- rownames(sce.big1)
+sce.big1 <- ScaleData(sce.big1,verbose = FALSE)
+##PCA降维
+sce.big1 <- RunPCA(sce.big1, features = VariableFeatures(object = sce.big1))
+
+
+##批次效应
+sce.big1 <-  RunHarmony(sce.big1, "orig.ident",
+                       plot_convergence = F,dims.use = 1:20) 
+sce.big1 <- FindNeighbors(sce.big1, dims = 1:20,reduction = 'harmony')
+sce.big1 <- FindClusters(sce.big1, resolution = 0.5)
+##resolution-0.5:20   resolution-0.8:22
+#clustree(sce.big@meta.data, prefix = "RNA_snn_res.")  ## 查看分群分辨率
+#sce.big <- RunTSNE(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+sce.big1 <- RunUMAP(object = sce.big1, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(sce.big1,reduction = "umap",label=T,raster = FALSE)
+
+
+##查看B细胞群
+DotPlot(sce.big1,features = c("MS4A1","CD79A","CD19","JCHAIN","MZB1"))
+##确定第4分群为B/P细胞
+bcell1 <- subset(sce.big1,seurat_clusters=="4")
+bcell1 <- NormalizeData(bcell1, normalization.method = "LogNormalize", scale.factor = 1e4) 
+bcell1 <- FindVariableFeatures(bcell1, selection.method = 'vst', nfeatures = 2000)
+##缩放
+bcell1 <- ScaleData(bcell1,verbose = FALSE)
+##PCA降维
+bcell1 <- RunPCA(bcell1, features = VariableFeatures(object = bcell1))
+
+bcell1 <-  RunHarmony(bcell1, "orig.ident",
+                     plot_convergence = F,dims.use = 1:20) 
+bcell1 <- FindNeighbors(bcell1, dims = 1:20,reduction = 'harmony')
+bcell1 <- FindClusters(bcell1, resolution = 0.8)
+##resolution-0.5:20   resolution-0.8:22
+#clustree(sce.big@meta.data, prefix = "RNA_snn_res.")  ## 查看分群分辨率
+#sce.big <- RunTSNE(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+bcell1 <- RunUMAP(object = bcell1, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(bcell1,reduction = "umap",label=T,raster = FALSE)
+
+
+
+
+
+
+
+##GSE298084的文件
+obj=list()
+count <- Read10X_h5('~/raw_data/GSE298084_RAW/GSM9007959_CRLM1_Colon_filtered_feature_bc_matrix.h5')
+obj[[6]] <- CreateSeuratObject(counts = count, min.cells = 3, min.features = 100, project = "CRLM1_Colon")
+
+library(DoubletFinder)
+for (i in 1:6) {
+  obj[[i]][["percent.mt"]] <- PercentageFeatureSet(obj[[i]], pattern = "^MT-")
+  obj[[i]] <- subset(obj[[i]], subset =  nFeature_RNA > 200 & nFeature_RNA < 7500 & percent.mt < 10 & nCount_RNA < 100000 )
+  obj[[i]] <- NormalizeData(obj[[i]], normalization.method = "LogNormalize", scale.factor = 10000)
+  obj[[i]] <- FindVariableFeatures(obj[[i]], selection.method = "vst", nfeatures = 2000)
+  obj[[i]] <- ScaleData(obj[[i]])
+  obj[[i]] <- RunPCA(obj[[i]])
+  obj[[i]] <- FindNeighbors(obj[[i]], dims = 1:20)
+  obj[[i]] <- FindClusters(obj[[i]], resolution = 0.5)
+  obj[[i]] <- RunUMAP(obj[[i]],dims = 1:20)
+  
+  sweep.res.list <- paramSweep(obj[[i]], PCs = 1:10, sct = FALSE)
+  #使用log标准化，sct参数设置为 sct = F（默认 ）,如使用SCT标准化方法，设置为T
+  for(j in 1:length(sweep.res.list)){
+    if(length(sweep.res.list[[j]]$pANN[is.nan(sweep.res.list[[j]]$pANN)]) != 0){
+      if(j != 1){
+        sweep.res.list[[j]] <- sweep.res.list[[j - 1]]
+      }else{
+        sweep.res.list[[j]] <- sweep.res.list[[j + 1]]
+      }
+    }
+  }
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  #可以看到最佳参数的点
+  pk_v <- as.numeric(as.character(bcmvn$pK))
+  pk_good <- pk_v[bcmvn$BCmetric==max(bcmvn$BCmetric)]
+  DoubletRate = 0.075
+  #10000细胞对应的doublets rate是～7.6%
+  homotypic.prop <- modelHomotypic(obj[[i]]$seurat_clusters) #最好提供celltype，而不是seurat_clusters。
+  nExp_poi <- round(DoubletRate*ncol(obj[[i]]))
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  obj[[i]] <- doubletFinder(obj[[i]], PCs = 1:10, pN = 0.25, pK = pk_good, nExp = nExp_poi.adj, reuse.pANN = FALSE, sct = FALSE)
+  
+}
+
+for (i in 1:6) {
+  colnames(obj[[i]]@meta.data)[7]<- "pANN"
+  colnames(obj[[i]]@meta.data)[8]<- "DF_classifications"
+}
+
+sce.big2 <- merge(obj[[1]],
+                  y = c(obj[[2]],
+                        obj[[3]],
+                        obj[[4]],
+                        obj[[5]],
+                        obj[[6]]),
+                  add.cell.ids = samples,
+                  project = "GSE298084")
+## 预处理
+sce.big2 <- subset(sce.big2,DF_classifications=="Singlet")
+sce.big2 <- NormalizeData(sce.big2, normalization.method = "LogNormalize", scale.factor = 1e4) 
+sce.big2 <- FindVariableFeatures(sce.big2, selection.method = 'vst', nfeatures = 2000)
+##缩放
+all.genes <- rownames(sce.big2)
+sce.big2 <- ScaleData(sce.big2,verbose = FALSE)
+##PCA降维
+sce.big2 <- RunPCA(sce.big2, features = VariableFeatures(object = sce.big2))
+
+
+##批次效应
+sce.big2 <-  RunHarmony(sce.big2, "orig.ident",
+                        plot_convergence = F,dims.use = 1:20) 
+sce.big2 <- FindNeighbors(sce.big2, dims = 1:20,reduction = 'harmony')
+sce.big2 <- FindClusters(sce.big2, resolution = 0.5)
+##resolution-0.5:20   resolution-0.8:22
+#clustree(sce.big@meta.data, prefix = "RNA_snn_res.")  ## 查看分群分辨率
+sce.big2 <- RunTSNE(object = sce.big2, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(sce.big2,reduction = "tsne",label=T,raster =FALSE)
+sce.big2 <- RunUMAP(object = sce.big2, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(sce.big2,reduction = "umap",label=T,raster = FALSE)
+
+
+##查看B细胞群
+DotPlot(sce.big2,features = c("MS4A1","CD79A","CD19","JCHAIN","MZB1"))
+##确定第10个分群为P细胞
+bcell2 <- subset(sce.big2,seurat_clusters=="10")
+bcell2 <- NormalizeData(bcell2, normalization.method = "LogNormalize", scale.factor = 1e4) 
+bcell2 <- FindVariableFeatures(bcell2, selection.method = 'vst', nfeatures = 2000)
+##缩放
+bcell2 <- ScaleData(bcell2,verbose = FALSE)
+##PCA降维
+bcell2 <- RunPCA(bcell2, features = VariableFeatures(object = bcell2))
+
+bcell2 <-  RunHarmony(bcell2, "orig.ident",
+                      plot_convergence = F,dims.use = 1:20) 
+bcell2 <- FindNeighbors(bcell2, dims = 1:20,reduction = 'harmony')
+bcell2 <- FindClusters(bcell2, resolution = 0.5)
+##resolution-0.5:20   resolution-0.8:22
+#clustree(sce.big@meta.data, prefix = "RNA_snn_res.")  ## 查看分群分辨率
+#sce.big <- RunTSNE(object = sce.big, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+bcell2 <- RunUMAP(object = bcell2, dims = 1:20, reduction = 'harmony', do.fast = TRUE)
+DimPlot(bcell2,reduction = "umap",label=T,raster = FALSE)
+
+
+bcell2$sample_orig <- "Metas"
+bcell2$sample_orig[bcell2$orig.ident=="CRLM1_Colon"|bcell2$orig.ident=="CRLM2_Colon"|bcell2$orig.ident=="CRLM3_Colon"] <- "Colon"
+
+
+Cellratio <- prop.table(table(bcell2@meta.data$seurat_clusters, bcell2@meta.data$sample_orig), margin = 2)#计算各组样本不同细胞群比例
+Cellratio <- as.data.frame(Cellratio)
+#Freq_change <- c('colon adjacent tissue','primary tumor','liver adjacent tissue','liver metastasis')
+Cellratio$Var2 <- factor(Cellratio$Var2,ordered=TRUE)
+ggplot(Cellratio,aes(x=Var1,y=Freq,fill=Var2))+
+  geom_bar(stat = 'identity',position = position_dodge(),
+           color="black",width = .8)+
+  theme_bw()
+
+
+DotPlot(bcell2,features = c('IFITM3'))
+####    结论：TFF3没有，IFITM3在第3簇中高表达，第3簇的Meta> Colon，和原实验保持一致。
+
+save.image(file = "other_CRC_GEO_data.RData")
