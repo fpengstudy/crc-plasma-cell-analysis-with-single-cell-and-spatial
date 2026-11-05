@@ -1,0 +1,258 @@
+
+####spatial GSE225857
+spa_list <- list()
+
+###加载空转数据集
+samples = list.files("~/raw_data/GSE225857_RAW")
+
+# sceList = lapply(samples,function(pro){
+#   folder=file.path("~/raw_data/GSE225857_RAW",pro)
+#   spe2 = Read10X(folder)
+#   image2 <- Read10X_Image(image.dir = file.path(folder, 
+#                                                 "spatial"), filter.matrix = TRUE)
+#   spe2 <- CreateSeuratObject(counts = spe2, assay = "Spatial",project = pro,min.cells = 3, min.features = 200)
+#   spe2[[pro]] <- image2
+#   image2 <- image2[Cells(x = spe2)]
+#   DefaultAssay(spe2 = image2) <- "Spatial"
+#   spe2_sct=SCTransform(spe2, verbose = FALSE,assay ="Spatial")
+# })
+  
+##一个样本的空转
+spe2 = Read10X("~/raw_data/GSE225857_RAW/GSM7058760_L2/")
+image2 <- Read10X_Image(image.dir = file.path("~/raw_data/GSE225857_RAW/GSM7058760_L2", 
+                                              "spatial"), filter.matrix = TRUE)
+spe2 <- CreateSeuratObject(counts = spe2, assay = "Spatial")
+spe2[["GSM7058760_L2"]] <- image2
+image2 <- image2[Cells(x = spe2)]
+DefaultAssay(spe2 = image2) <- "Spatial"
+spe2_sct=SCTransform(spe2, verbose = FALSE,assay ="Spatial")
+SpatialFeaturePlot(spe2_sct, features = "nFeature_Spatial")
+spa_list[["GSM7058760_L2"]] <- spe2_sct
+
+
+
+##缩放
+#library(DoubletFinder)
+for (i in samples) {
+  spa_list[[i]][["percent.mt"]] <- PercentageFeatureSet(spa_list[[i]], pattern = "^MT-")
+  #spa_list[[i]] <- subset(spa_list[[i]], subset =  nFeature_Spatial > 200 & nFeature_Spatial < 7500 & percent.mt < 10 & nCount_Spatial < 100000 )   ##不适合，会损伤点
+  spa_list[[i]] <- RunPCA(spa_list[[i]],assay = "SCT", verbose = FALSE)
+  spa_list[[i]] <- FindNeighbors(spa_list[[i]], dims = 1:20)
+  spa_list[[i]] <- FindClusters(spa_list[[i]], resolution = 0.5)
+  spa_list[[i]] <- RunUMAP(spa_list[[i]],dims = 1:20)
+  spa_list[[i]]@meta.data[1] <- i
+}
+
+
+##合并
+spa.merge <- merge(spa_list[["GSM7058756_C1"]],
+                   y = c(spa_list[["GSM7058757_C2"]],
+                         spa_list[["GSM7058758_C3"]],
+                         spa_list[["GSM7058759_C4"]],
+                         spa_list[["GSM7058760_L1"]],
+                         spa_list[["GSM7058760_L2"]]),add.cell.ids = samples)
+##聚类
+DefaultAssay(spa.merge) <- "SCT"
+VariableFeatures(spa.merge) <- c(VariableFeatures(spa_list[["GSM7058756_C1"]]), VariableFeatures(spa_list[["GSM7058757_C2"]]),VariableFeatures(spa_list[["GSM7058758_C3"]]),VariableFeatures(spa_list[["GSM7058759_C4"]]),VariableFeatures(spa_list[["GSM7058760_L1"]]),VariableFeaturePlot(spa_list[["GSM7058760_L2"]]))
+spa.merge <- RunPCA(spa.merge, verbose = FALSE)
+spa.merge <-  RunHarmony(spa.merge, "orig.ident",
+                        plot_convergence = F,dims.use = 1:20) 
+spa.merge <- FindNeighbors(spa.merge, dims = 1:20,reduction = 'harmony')
+spa.merge <- FindClusters(spa.merge, verbose = FALSE,resolution = 0.8)
+spa.merge <- RunUMAP(spa.merge, dims = 1:20,reduction = 'harmony', do.fast = TRUE)
+##查看某一个切片的图
+SpatialDimPlot(spa.merge, images = 'GSM7058756_C1',pt.size.factor = 2)
+
+
+##查看marker gene
+DimPlot(spa.merge)
+#spa.merge <- JoinLayers(spa.merge)
+DefaultAssay(spa.merge) <- "Spatial"  ##之前是"SCT"
+spa.merge <- NormalizeData(spa.merge, assay = "Spatial")  ##缺少data
+spa.merge <- JoinLayers(spa.merge, assay = "Spatial", layer = "data")
+spa.merge.markers <- FindAllMarkers(spa.merge,logfc.threshold = 0.25,min.pct = 0.1,only.pos = TRUE,test.use = "wilcox")
+DotPlot(spa.merge,features = c("EPCAM","CDH1","WFDC2","CDKN2A",    ##epithelial
+                               "CD3D",'CD3E',"CD2","GNLY",    ##T/NK
+                               'CD68','LYZ','CD14',    ##myeloid
+                               'CD68','CD163',    ##macrophage
+                               'S100A8','CSF3R',    ##monocyte
+                               #'CD19','CD79A','JCHAIN',    ##B/plasma
+                               "MS4A1","CD79A",    ##B
+                               "JCHAIN","MZB1",    ##plasma
+                               'COL1A1','POSTN',    ##fibroblast
+                               'PLVAP','CDH5','EMCN',    ##EC
+                               #'ACTA2','RGS5','MYH11',    
+                               'CPA3','TPSD1','MS4A2'    #Granulocytes
+))
+
+
+#### fibroblast 'COL1A1','COL1A2','POSTN','PRELP','MCAM','HAS1','F3','CCL11','IGFL2','COCH','MKI67'
+#### b/plasma  'CD19','CD79A','JCHAIN',"MS4A1","MZB1",'IGKC','IGLC3','IGHG2','IGLL1','IGHD','PPIB','IGLJ3'
+#### ENDOTHELIAL 'PLVAP','CDH5','EMCN','SELP','DLL4','NOTCH3','CD36','CLEC4G','PECAM1','CD34'
+####
+
+
+cluster_labs <- c("0"="Epithelial cells",
+                  "1"="Myeloid cells",
+                  "2"="Epithelial cells",
+                  "3"="B/Plasma cells",
+                  "4"="B/Plasma cells",
+                  "5"="Fibroblast cells",
+                  "6"="Fibroblast cells",
+                  "7"="Endothelial cells",
+                  "8"="Myeloid cells",
+                  "9"="Muscle cells",
+                  "10"="Epithelial cells",
+                  "11"="Epithelial cells",
+                  "12"="Fibroblast cells",
+                  "13"="T/NK cells",
+                  "14"="Myeloid cells",
+                  "15"="Myeloid cells",
+                  "16"="B/Plasma cells",
+                  "17"="Epithelial cells",
+                  "18"="Epithelial cells",
+                  "19"="Fibroblast cells",
+                  "20"="Fibroblast cells",
+                  "21"="Endothelial cells",
+                  "22"="B/Plasma cells",
+                  "23"="B/Plasma cells",
+                  "24"="Myeloid cells")
+
+
+spa.merge@meta.data$annotation <- cluster_labs[spa.merge@meta.data$seurat_clusters]
+DimPlot(spa.merge,reduction = "umap",label=T,group.by = "annotation")
+
+spa.merge.annotation.markers <- FindAllMarkers(spa.merge,logfc.threshold = 0.25,min.pct = 0.1,only.pos = TRUE,test.use = "wilcox")
+##C1_spatial_dimplot_annotation
+
+spa.merge.annotation.top10 <- spa.merge.annotation.markers %>% group_by(cluster) %>% top_n(n=10,wt=avg_log2FC)
+DoHeatmap(spa.merge,features = spa.merge.annotation.top10$gene)
+
+
+sample_resource <- c("GSM7058756_C1"="primary tumor",
+                     "GSM7058757_C2"="primary tumor",
+                     "GSM7058758_C3"="primary tumor",
+                     "GSM7058759_C4"="primary tumor",
+                     "GSM7058760_L1"="liver metastasis",
+                     "GSM7058760_L2"="liver metastasis")
+spa.merge@meta.data$sample_orig <- sample_resource[spa.merge@meta.data$orig.ident]
+
+Cellratio <- prop.table(table(spa.merge@meta.data$annotation, spa.merge@meta.data$sample_orig), margin = 2)#计算各组样本不同细胞群比例
+Cellratio <- as.data.frame(Cellratio)
+colourCount = length(unique(Cellratio$Var1))
+#Freq_change <- c('colon adjacent tissue','primary tumor','liver adjacent tissue','liver metastasis')
+#Cellratio$Var2 <- factor(Cellratio$Var2,ordered=TRUE,levels=Freq_change)
+
+ggplot(data = Cellratio, aes(x =Var2, y = Freq, fill =  Var1)) +
+  geom_bar(stat = "identity", width=0.8,position="fill")+
+  ##显示数值
+  #geom_text(size = 3, position = position_stack(vjust = 0.5),aes(label=sprintf("%0.2f", round(Freq, digits = 2))))+
+  scale_fill_d3()+
+  theme_bw()+
+  theme(panel.grid =element_blank()) +
+  labs(x="",y="Ratio")+
+  ####用来将y轴移动位置
+  theme(axis.text.y = element_text(size=12, colour = "black"))+
+  theme(axis.text.x = element_text(size=12, colour = "black"))+
+  theme(
+    axis.text.x.bottom = element_text(hjust = 1, vjust = 1, angle = 45)
+  ) 
+
+
+####细胞通讯
+library(CellChat)
+
+cellchat_list <- list()
+
+##做六个细胞通讯  实验"GSM7058757_C2"
+
+for (sample_name in names(spa_list)) {
+  ## 将annotation加到原表格中
+  spa_list[[sample_name]]@meta.data$cellname <- paste(spa_list[[sample_name]]@meta.data$orig.ident,rownames(spa_list[[sample_name]]@meta.data),sep = "_")
+  result <- inner_join(spa_list[[sample_name]]@meta.data, 
+                       annotation_info, 
+                       by = "cellname")
+  spa_list[[sample_name]]@meta.data$annotation <- result$annotation
+  Idents(spa_list[[sample_name]]) <- "annotation"
+  
+  # 1. 准备该样本的数据
+  obj <- spa_list[[sample_name]]
+  meta <- obj@meta.data
+  meta <- (data.frame(labels = Idents(obj)))
+  # 假设您已将聚类信息存储在 meta$labels 列中
+  spatial.locs <- GetTissueCoordinates(obj,cols = c("imagerow", "imagecol")) # 获取该样本坐标
+  spatial.locs$cell <- NULL
+  #names(spatial.locs) <- c("imagerow","imagecol")
+  
+  DefaultAssay(obj) <- "Spatial"
+  obj <- NormalizeData(obj)
+  data.input <- GetAssayData(obj, slot = "data", assay = "Spatial")
+  spatial_info <- obj@images[[sample_name]]
+  spatial.factors <- spatial_info@scale.factors
+  spatial.factors[["spot.diameter"]] <-  spatial.factors[["spot"]]
+  # 2. 创建该样本的 CellChat 对象
+  cellchat <- createCellChat(object = data.input,
+                             meta = meta,
+                             group.by = "labels",
+                             datatype = "spatial",
+                             coordinates = spatial.locs,
+                             scale.factors = spatial.factors)
+  
+  CellChatDB <- CellChatDB.human
+  CellChatDB.use <- subsetDB(CellChatDB, 
+                             search = "Secreted Signaling", 
+                             key = "annotation")
+  cellchat@DB <- CellChatDB.use
+  cellchat <- subsetData(cellchat)
+  # 3. 进行该样本的CellChat标准分析（识别过表达配受体、推断通讯概率等）
+  cellchat <- identifyOverExpressedGenes(cellchat)
+  cellchat <- identifyOverExpressedInteractions(cellchat)
+  
+  coords <- cellchat@images$coordinates
+  coords_matrix <- as.matrix(coords)
+  colnames(coords_matrix) <- c("imagecol", "imagerow")
+  cellchat@images$coordinates <- coords_matrix
+  cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1, distance.use = TRUE,scale.distance = 0.01)
+  
+  cellchat <- filterCommunication(cellchat, min.cells = 10)
+  cellchat <- computeCommunProbPathway(cellchat)
+  cellchat <- aggregateNet(cellchat)
+  
+  # 4. 存入列表
+  cellchat_list[[sample_name]] <- cellchat
+}
+
+
+
+##作出相关图(在list里面逐个做)
+#### cellchat_list[['GSM7058756_C1']] 
+#### "GSM7058756_C1" "GSM7058757_C2" "GSM7058758_C3" "GSM7058759_C4" "GSM7058760_L1" "GSM7058760_L2"
+#显示交互次数或总交互次数
+netVisual_circle(cellchat_list[['GSM7058760_L2']] @net$count, vertex.weight = rowSums(cellchat_list[['GSM7058760_L2']] @net$count), weight.scale = T, label.edge= F, title.name = "L2 Number of interactions")
+netVisual_circle(cellchat_list[['GSM7058760_L2']] @net$weight, vertex.weight = rowSums(cellchat_list[['GSM7058760_L2']] @net$weight), weight.scale = T, label.edge= F, title.name = "L2 Interaction weights-strength")
+#显示celltype间的通讯次数（左）或总通讯强度(右)
+netVisual_heatmap(cellchat_list[['GSM7058760_L2']] , measure = "count", color.heatmap = "Blues")
+netVisual_heatmap(cellchat_list[['GSM7058760_L2']] , measure = "weight", color.heatmap = "Blues")
+#绘制配体受体气泡图，指定受体-配体细胞类型
+netVisual_bubble(cellchat_list[['GSM7058760_L2']] , sources.use = c(2), 
+                 targets.use = c(1), remove.isolate = FALSE,
+                 title.name = "L2 bubble communication between Cluster 2 to 1")
+
+netVisual_bubble(cellchat_list[['GSM7058760_L2']] , sources.use = c(1), 
+                 targets.use = c(2), remove.isolate = FALSE,
+                 title.name = "L2 bubble communication between Cluster 1 to 2")
+##和线图
+netVisual_chord_cell(cellchat_list[['GSM7058760_L2']], 
+                     net = cellchat_list[['GSM7058760_L2']]@net$weight,
+                     sources.use = c(1, 2),  # 发送方
+                     targets.use = c(1, 2),  # 接收方
+                     title.name = "L2 Bidirectional communication between Cluster 1 & 2")
+##spatial图
+cellchat_list[['GSM7058756_C1']] <- netAnalysis_computeCentrality(cellchat_list[['GSM7058756_C1']], slot.name = "netP")
+netVisual_aggregate(cellchat_list[['GSM7058756_C1']], signaling = "MIF", layout = "spatial", edge.width.max = 2, alpha.image = 0.2, vertex.size.max = 4, vertex.label.cex = 3.5)
+
+
+#### cellchat_C2保留跑通了的样本
+##保存环境
+save.image("~/R/CRC_39samples/spatial_GSE.RData")
+
