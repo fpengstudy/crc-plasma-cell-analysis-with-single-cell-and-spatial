@@ -1,0 +1,356 @@
+library(data.table)
+library(dplyr)
+library(stringr)
+
+library(survival)
+library(survminer)
+library(broom)
+
+data_dir <- "/public/home/fpeng/tools/TCGA_CRC/GDCdata"
+sample_file <- "/public/home/fpeng/tools/TCGA_CRC/gdc_sample_sheet.2026-11-02.tsv"
+clinical_tar <- "/public/home/fpeng/tools/TCGA_CRC/clinical.cart.2026-11-02"
+metadata_file <- "/public/home/fpeng/tools/TCGA_CRC/metadata.repository.2026-11-02.json"
+
+# 临床文件解压目录
+clinical_dir <- "/public/home/fpeng/tools/TCGA_CRC/clinical_unpacked"
+
+dir.create(
+  path.expand(clinical_dir),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+##读取
+sample_sheet <- fread(
+  sample_file,
+  sep = "\t",
+  header = TRUE,
+  data.table = FALSE
+)
+names(sample_sheet) <- make.names(
+  names(sample_sheet),
+  unique = TRUE
+)
+
+sample_primary <- sample_sheet %>%
+  filter(
+    sample_sheet$Project.ID %in% c("TCGA-COAD", "TCGA-READ"),
+    sample_sheet$Tumor.Descriptor == "Primary"
+  )
+
+sample_primary %>%
+  distinct(Project.ID, Case.ID) %>%
+  count(Project.ID)
+##Project.ID   n
+##1  TCGA-COAD 458
+##2  TCGA-READ 166
+
+##提取 基因 表达量
+nme2_list <- lapply(seq_len(nrow(sample_primary)), function(i) {
+  
+  f <- file.path(
+    data_dir,
+    sample_primary$File.Name[i]
+  )
+  
+  if (!file.exists(f)) {
+    warning("File not found: ", f)
+    return(NULL)
+  }
+  
+  dat <- fread(f)
+  
+  if (!all(c("gene_name", "tpm_unstranded") %in% names(dat))) {
+    warning("Required columns missing: ", f)
+    return(NULL)
+  }
+  
+  gene <- dat[gene_name == "TPI1"]
+  
+  if (nrow(gene) == 0) {
+    warning("NME2 not found: ", f)
+    return(NULL)
+  }
+  
+  data.frame(
+    file_id = sample_primary$File.ID[i],
+    file_name = sample_primary$File.Name[i],
+    patient = sample_primary$Case.ID[i],
+    project = sample_primary$Project.ID[i],
+    sample_id = sample_primary$Sample.ID[i],
+    NME2_TPM = as.numeric(gene$tpm_unstranded[1])
+  )
+})
+
+nme2_expr <- bind_rows(nme2_list)
+
+# 检查提取结果
+#dim(nme2_expr)
+#head(nme2_expr)
+#summary(nme2_expr$NME2_TPM)
+#table(nme2_expr$project)
+
+##临床信息去重
+nme2_patient <- nme2_expr %>%
+  group_by(project, patient) %>%
+  summarise(
+    NME2_TPM = mean(NME2_TPM, na.rm = TRUE),
+    n_files = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    NME2_log2 = log2(NME2_TPM + 1)
+  )
+
+#table(nme2_patient$project)
+
+#summary(nme2_patient$NME2_log2)
+
+#write.csv(nme2_patient,"TCGA_COAD_READ_NME2_expression.csv",row.names = FALSE)
+
+##clinical
+clinical_files <- list.files(
+  path.expand(clinical_tar),
+  recursive = TRUE,
+  full.names = TRUE
+)
+clinical_tables <- lapply(
+  clinical_files[grepl("\\.tsv$", clinical_files)],
+  function(f) {
+    fread(f, sep = "\t", data.table = FALSE)
+  }
+)
+names(clinical_tables) <- basename(
+  clinical_files[grepl("\\.tsv$", clinical_files)]
+)
+lapply(clinical_tables, names)
+
+
+##构建clinical
+clinical <- clinical_tables$clinical.tsv %>%
+  select(
+    project.project_id,
+    cases.case_id,
+    cases.submitter_id,
+    demographic.age_at_index,
+    demographic.vital_status,
+    demographic.sex_at_birth,
+    demographic.days_to_death,
+    diagnoses.ajcc_pathologic_stage,
+    diagnoses.days_to_last_follow_up
+  )
+
+clinical <- clinical %>%
+  mutate(
+    OS_event = case_when(
+      demographic.vital_status == "Dead" ~ 1,
+      demographic.vital_status == "Alive" ~ 0,
+      TRUE ~ NA_real_
+    ),
+    demographic.days_to_death = as.numeric(demographic.days_to_death),
+    
+    diagnoses.days_to_last_follow_up = as.numeric(
+      diagnoses.days_to_last_follow_up
+    ),
+    
+    OS_time = case_when(
+      OS_event == 1 ~ demographic.days_to_death,
+      OS_event == 0 ~ diagnoses.days_to_last_follow_up,
+      TRUE ~ NA_real_
+    ),
+    )
+
+
+#colnames(clinical)[1] <- "project"
+colnames(clinical)[3] <- "patient"
+##去重
+clinical_unique <- clinical %>%
+  mutate(
+    .valid_stage = !is.na(diagnoses.ajcc_pathologic_stage) &
+      trimws(as.character(diagnoses.ajcc_pathologic_stage)) != "'--"
+  ) %>%
+  group_by(cases.case_id) %>%
+  mutate(
+    .has_stage = any(.valid_stage)
+  ) %>%
+  filter(
+    if_else(.has_stage, .valid_stage, TRUE)
+  ) %>%
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  select(-.valid_stage, -.has_stage)
+
+
+
+####
+##合并
+surv_all <- nme2_patient %>%
+  inner_join(
+    clinical_unique,
+    by = "patient"
+  ) %>%
+  filter(
+    !is.na(OS_time),
+    !is.na(OS_event),
+    OS_time > 0
+  ) %>%
+  mutate(
+    NME2_z = as.numeric(scale(NME2_log2))
+  )
+
+#table(surv_all$OS_event,surv_all$project)
+##TCGA-COAD TCGA-READ
+##0       338       130
+##1       95        26
+
+surv_coad <- surv_all %>%
+  filter(project == "TCGA-COAD")
+surv_read <- surv_all %>%
+  filter(project == "TCGA-READ")
+
+##单因素分析
+run_cox <- function(dat, cohort_name) {
+  
+  # 单因素 Cox：NME2 连续变量
+  fit_uni <- coxph(
+    Surv(OS_time, OS_event) ~ NME2_z,
+    data = dat
+  )
+  
+  uni_result <- tidy(
+    fit_uni,
+    exponentiate = TRUE,
+    conf.int = TRUE
+  ) %>%
+    mutate(
+      Cohort = cohort_name,
+      Model = "Univariable"
+    )
+  
+  # 多因素 Cox：调整年龄、性别、分期
+  dat_multi <- dat %>%
+    filter(
+      !is.na(demographic.age_at_index),
+      !is.na(demographic.sex_at_birth),
+      !is.na(diagnoses.ajcc_pathologic_stage)
+    ) %>%
+    mutate(
+      demographic.sex_at_birth = factor(demographic.sex_at_birth),
+      diagnoses.ajcc_pathologic_stage = factor(diagnoses.ajcc_pathologic_stage)
+    ) %>%
+    droplevels()
+  
+  fit_multi <- coxph(
+    Surv(OS_time, OS_event) ~
+      NME2_z + demographic.age_at_index + demographic.sex_at_birth + diagnoses.ajcc_pathologic_stage,
+    data = dat_multi
+  )
+  
+  multi_result <- tidy(
+    fit_multi,
+    exponentiate = TRUE,
+    conf.int = TRUE
+  ) %>%
+    mutate(
+      Cohort = cohort_name,
+      Model = "Multivariable"
+    )
+  
+  list(
+    univariable = fit_uni,
+    multivariable = fit_multi,
+    uni_table = uni_result,
+    multi_table = multi_result,
+    multi_data = dat_multi
+  )
+}
+##分别计算
+result_coad <- run_cox(
+  surv_coad,
+  "TCGA-COAD"
+)
+
+result_read <- run_cox(
+  surv_read,
+  "TCGA-READ"
+)
+
+##单因素
+primary_cox <- bind_rows(
+  result_coad$uni_table,
+  result_read$uni_table
+) %>%
+  filter(term == "NME2_z") %>%
+  mutate(
+    FDR = p.adjust(p.value, method = "BH")
+  )
+
+primary_cox
+
+##多因素
+cox_table <- bind_rows(
+  result_coad$uni_table,
+  result_coad$multi_table,
+  result_read$uni_table,
+  result_read$multi_table
+) %>%
+  filter(term == "NME2_z") %>%
+  select(
+    Cohort,
+    Model,
+    estimate,
+    conf.low,
+    conf.high,
+    p.value
+  )
+
+cox_table
+
+
+
+##生存分析
+plot_km <- function(dat, cohort_name) {
+  
+  cutoff <- mean(
+    dat$NME2_log2,
+    na.rm = TRUE
+  )
+  
+  dat <- dat %>%
+    mutate(
+      NME2_group = ifelse(
+        NME2_log2 >= cutoff,
+        "High",
+        "Low"
+      )
+    )
+  
+  dat$NME2_group <- factor(
+    dat$NME2_group,
+    levels = c("Low", "High")
+  )
+  
+  fit <- survfit(
+    Surv(OS_time, OS_event) ~ NME2_group,
+    data = dat
+  )
+  
+  p <- ggsurvplot(
+    fit,
+    data = dat,
+    pval = TRUE,
+    risk.table = TRUE,
+    conf.int = TRUE,
+    xlab = "Days",
+    ylab = "Overall survival probability",
+    title = cohort_name,
+    linetype = "strata",  
+    palette = "jco",    
+    legend.title = "TPI1 expression",
+    legend.labs = c("Low", "High")
+  )
+  
+  return(p)
+}
+
+plot_km(surv_coad,"TCGA-COAD")
